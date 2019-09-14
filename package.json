@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "",
   "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "author": "dignifiedquire <dignifiedquire@users.noreply.github.com>",
   "license": "MIT",
   "dependencies": {
