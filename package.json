@@ -1,5 +1,5 @@
 {
-  "name": "deltachat-neon",
+  "name": "deltachat",
   "version": "0.1.0",
   "description": "",
   "main": "lib/index.js",
@@ -9,6 +9,11 @@
     "neon-cli": "^0.3.1"
   },
   "scripts": {
-    "install": "neon build"
+    "install": "neon build",
+    "test": "node test/index.js"
+  },
+  "devDependencies": {
+    "tape": "^4.11.0",
+    "tempy": "^0.3.0"
   }
 }

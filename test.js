@@ -5,12 +5,15 @@ let ctx = new Context((event, data) => {
 });
 
 console.log("opening database");
-ctx.open("test-db");
+ctx.open("test-db", (err) => {
+  if (err != null) {
+    throw err;
+  }
+  console.log("connecting");
+  ctx.connect();
 
-console.log("connecting");
-ctx.connect();
-
-setTimeout(() => {
-  console.log("disconnecting")
-  ctx.disconnect();
-}, 200);
+  setTimeout(() => {
+    console.log("disconnecting")
+    ctx.close();
+  }, 200);
+});

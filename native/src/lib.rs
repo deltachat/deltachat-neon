@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate neon;
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -9,13 +10,72 @@ use neon::context::Context as NeonContext;
 use neon::prelude::*;
 
 use deltachat::{
+    config, configure,
     constants::Event,
+    contact,
     context::{self, Context},
     job,
 };
 
 lazy_static! {
     static ref CALLBACK: RwLock<Option<EventHandler>> = RwLock::new(None);
+}
+
+struct OpenTask {
+    context: Arc<RwLock<Context>>,
+    dbfile: String,
+    blobdir: Option<String>,
+}
+
+impl OpenTask {
+    pub fn new(context: Arc<RwLock<Context>>, dbfile: String, blobdir: Option<String>) -> Self {
+        OpenTask {
+            context,
+            dbfile,
+            blobdir,
+        }
+    }
+}
+
+impl Task for OpenTask {
+    type Output = ();
+    type Error = String;
+    type JsEvent = JsUndefined;
+
+    fn perform(&self) -> Result<Self::Output, Self::Error> {
+        let dir = std::path::Path::new(&self.dbfile);
+
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("Failed to create directory {:?}", err))?;
+
+        let dbfile = dir.join("db.sqlite");
+
+        let opened = unsafe {
+            let lock = self.context.read().unwrap();
+            context::dc_open(
+                &lock,
+                dbfile.to_str().unwrap(),
+                self.blobdir.as_ref().map(|s| s.as_str()),
+            )
+        };
+
+        if !opened {
+            Err("Failed to open database".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn complete(
+        self,
+        mut cx: TaskContext,
+        result: Result<Self::Output, Self::Error>,
+    ) -> JsResult<Self::JsEvent> {
+        match result {
+            Ok(_) => Ok(cx.undefined()),
+            Err(err) => cx.throw_error(err),
+        }
+    }
 }
 
 unsafe extern "C" fn callback(
@@ -122,12 +182,12 @@ declare_types! {
 
             let ctx = context::dc_context_new(Some(callback), std::ptr::null_mut(), None);
 
-            let f = cx.argument::<JsFunction>(0)?;
+            if let Some(f) = cx.argument_opt(0) {
+                let cb = &mut *CALLBACK.write().unwrap();
+                assert!(cb.is_none(), "Only one context supported at the moment");
 
-            let cb = &mut *CALLBACK.write().unwrap();
-            assert!(cb.is_none(), "Only one context supported at the moment");
-
-            *cb = Some(EventHandler::new(this, f));
+                *cb = Some(EventHandler::new(this, f.downcast::<JsFunction>().or_throw(&mut cx)?));
+            }
 
             Ok(ContextWrapper {
                 context: Arc::new(RwLock::new(ctx)),
@@ -140,22 +200,60 @@ declare_types! {
             let this = cx.this();
 
             let dbfile = cx.argument::<JsString>(0)?.value();
-            let blobdir = match cx.argument_opt(1) {
-                Some(v) => Some(v.downcast::<JsString>().or_throw(&mut cx)?.value()),
-                None => None,
-            };
+            let blobdir = None;
 
-            let opened = {
+            let context = {
                 let guard = cx.lock();
                 let ctx = this.borrow(&guard);
-                unsafe {
-                    context::dc_open(&ctx.context.clone().read().unwrap(), &dbfile, blobdir.as_ref().map(|s| s.as_str()))
-                }
+                ctx.context.clone()
             };
 
-            assert!(opened, "Failed to open {} - {:?}", dbfile, blobdir);
+            let cb = OpenTask::new(context, dbfile, blobdir);
+            cb.schedule(cx.argument::<JsFunction>(1)?);
 
             Ok(cx.undefined().upcast())
+        }
+
+        method configure(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            unsafe { configure::configure(&context.read().unwrap()) };
+
+            Ok(cx.undefined().upcast())
+        }
+
+        method getInfo(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            let res = unsafe {
+                let c_str = context::dc_get_info(&context.read().unwrap());
+                std::ffi::CStr::from_ptr(c_str).to_str().unwrap()
+            };
+
+            let info = JsObject::new(&mut cx);
+
+            for line in res.lines() {
+                let mut parts = line.split_terminator('=');
+                let key = parts.next().unwrap_or_default();
+                let value = cx.string(parts.next().unwrap_or_default());
+
+                info.set(&mut cx, key, value)?;
+            }
+
+
+            Ok(info.upcast())
         }
 
         method connect(mut cx) {
@@ -239,7 +337,7 @@ declare_types! {
             Ok(cx.undefined().upcast())
         }
 
-        method disconnect(mut cx) {
+        method close(mut cx) {
             let mut this = cx.this();
             {
                 let guard = cx.lock();
@@ -264,11 +362,88 @@ declare_types! {
             }
             Ok(cx.undefined().upcast())
         }
+
+        method isOpen(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            let res = unsafe { context::dc_is_open(&context.read().unwrap()) };
+
+            Ok(cx.boolean(res == 1).upcast())
+        }
+
+        method isConfigured(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            let res = configure::dc_is_configured(&context.read().unwrap());
+
+            Ok(cx.boolean(res).upcast())
+        }
+
+        method getConfig(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            let key = config::Config::from_str(&cx.argument::<JsString>(0)?.value()).expect("invalid key");
+            let res = context.read().unwrap().get_config(key).expect("Faile to get config");
+
+            Ok(cx.string(res).upcast())
+        }
+
+        method getBlobdir(mut cx) {
+            let this = cx.this();
+
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+
+            let blobdir = unsafe {
+                let ptr = context.read().unwrap().get_blobdir();
+                assert!(!ptr.is_null());
+                std::ffi::CStr::from_ptr(ptr).to_str().unwrap()
+            };
+
+            Ok(cx.string(blobdir).upcast())
+        }
     }
+}
+
+fn maybe_valid_addr(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+    let addr = match cx.argument_opt(0) {
+        Some(v) => match v.downcast::<JsString>() {
+            Ok(v) => v.value(),
+            Err(_) => return Ok(cx.boolean(false)),
+        },
+        None => return Ok(cx.boolean(false)),
+    };
+
+    let res = contact::may_be_valid_addr(&addr);
+
+    Ok(cx.boolean(res))
 }
 
 // Export the class
 register_module!(mut m, {
     m.export_class::<JsContext>("Context")?;
+    m.export_function("maybeValidAddr", maybe_valid_addr)?;
+
     Ok(())
 });
