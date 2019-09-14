@@ -409,10 +409,12 @@ function dc (fn) {
 
     // t.is(dc.isOpen(), false, 'context database is not open')
     dc.open(cwd, (err) => {
-      console.log("opened", err);
       t.is(err, null, 'failed to open database')
       t.is(dc.isOpen(), true, 'context database is open')
       t.is(dc.isConfigured(), false, 'should not be configured')
+
+      dc.connect()
+
       fn(t, dc, cwd)
     })
   }
