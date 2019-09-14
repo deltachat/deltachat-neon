@@ -356,9 +356,9 @@ declare_types! {
                     if let Some(handles) = ctx.handles.take() {
                         handles.join().unwrap();
                     }
-
-                    CALLBACK.write().unwrap().take();
                 }
+
+                CALLBACK.write().unwrap().take();
             }
             Ok(cx.undefined().upcast())
         }
