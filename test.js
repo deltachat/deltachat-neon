@@ -1,7 +1,7 @@
 const { Context } = require('./lib');
 
-let ctx = new Context((val) => {
-  console.log("CALLBACK", val);
+let ctx = new Context((event, data) => {
+  console.log(`[${event}] ${data}`);
 });
 
 console.log("opening database");
@@ -13,4 +13,4 @@ ctx.connect();
 setTimeout(() => {
   console.log("disconnecting")
   ctx.disconnect();
-}, 100);
+}, 200);
