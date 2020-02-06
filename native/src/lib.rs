@@ -297,6 +297,22 @@ declare_types! {
 
             Ok(cx.string(blobdir).upcast())
         }
+
+        method createContact(mut cx) {
+            let this = cx.this();
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+            let ctx = context.read().unwrap();
+
+            let name = cx.argument::<JsString>(0)?.value();
+            let addr = cx.argument::<JsString>(1)?.value();
+            let contact = contact::Contact::create(&ctx, name, addr).unwrap();
+
+            Ok(cx.number(contact).upcast())
+        }
     }
 }
 
@@ -317,6 +333,7 @@ fn maybe_valid_addr(mut cx: FunctionContext) -> JsResult<JsBoolean> {
 // Export the class
 register_module!(mut m, {
     m.export_class::<JsContext>("Context")?;
+    m.export_class::<JsContext>("Contact")?;
     m.export_function("maybeValidAddr", maybe_valid_addr)?;
 
     Ok(())
