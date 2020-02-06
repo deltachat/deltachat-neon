@@ -5,130 +5,14 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use lazy_static::lazy_static;
 use neon::context::Context as NeonContext;
 use neon::prelude::*;
 
 use deltachat::{
-    config, configure,
-    constants::Event,
-    contact,
+    config, configure, contact,
     context::{self, Context},
-    job,
+    job, Event,
 };
-
-lazy_static! {
-    static ref CALLBACK: RwLock<Option<EventHandler>> = RwLock::new(None);
-}
-
-struct OpenTask {
-    context: Arc<RwLock<Context>>,
-    dbfile: String,
-    blobdir: Option<String>,
-}
-
-impl OpenTask {
-    pub fn new(context: Arc<RwLock<Context>>, dbfile: String, blobdir: Option<String>) -> Self {
-        OpenTask {
-            context,
-            dbfile,
-            blobdir,
-        }
-    }
-}
-
-impl Task for OpenTask {
-    type Output = ();
-    type Error = String;
-    type JsEvent = JsUndefined;
-
-    fn perform(&self) -> Result<Self::Output, Self::Error> {
-        let dir = std::path::Path::new(&self.dbfile);
-
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("Failed to create directory {:?}", err))?;
-
-        let dbfile = dir.join("db.sqlite");
-
-        let opened = unsafe {
-            let lock = self.context.read().unwrap();
-            context::dc_open(
-                &lock,
-                dbfile.to_str().unwrap(),
-                self.blobdir.as_ref().map(|s| s.as_str()),
-            )
-        };
-
-        if !opened {
-            Err("Failed to open database".to_string())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn complete(
-        self,
-        mut cx: TaskContext,
-        result: Result<Self::Output, Self::Error>,
-    ) -> JsResult<Self::JsEvent> {
-        match result {
-            Ok(_) => Ok(cx.undefined()),
-            Err(err) => cx.throw_error(err),
-        }
-    }
-}
-
-unsafe extern "C" fn callback(
-    _ctx: &Context,
-    event: Event,
-    _data1: libc::uintptr_t,
-    data2: libc::uintptr_t,
-) -> libc::uintptr_t {
-    let data2_string = match event {
-        Event::INFO
-        | Event::WARNING
-        | Event::ERROR
-        | Event::SMTP_CONNECTED
-        | Event::IMAP_CONNECTED
-        | Event::ERROR_NETWORK => {
-            let data2 = data2 as *const libc::c_char;
-            if data2.is_null() {
-                Some("".to_string())
-            } else {
-                Some(
-                    std::ffi::CStr::from_ptr(data2)
-                        .to_string_lossy()
-                        .to_string(),
-                )
-            }
-        }
-        _ => None,
-    };
-
-    if let Some(ref cb) = &*CALLBACK.read().unwrap() {
-        cb.schedule(move |cx, this, callback| {
-            let args: Vec<Handle<JsValue>> = match event {
-                Event::INFO
-                | Event::WARNING
-                | Event::ERROR
-                | Event::SMTP_CONNECTED
-                | Event::IMAP_CONNECTED
-                | Event::ERROR_NETWORK => vec![
-                    cx.string(format!("{:?}", event)).upcast(),
-                    cx.string(data2_string.unwrap()).upcast(),
-                ],
-                _ => vec![
-                    cx.string(format!("{:?}", event)).upcast(),
-                    cx.undefined().upcast(),
-                ],
-            };
-
-            let _result = callback.call(cx, this, args);
-        });
-    }
-
-    0 as libc::uintptr_t
-}
 
 pub struct ContextWrapper {
     context: Arc<RwLock<Context>>,
@@ -179,15 +63,49 @@ declare_types! {
     pub class JsContext for ContextWrapper {
         init(mut cx) {
             let this = cx.this();
+            let cb: Box<deltachat::context::ContextCallback> = if let Some(f) = cx.argument_opt(1) {
+                let f = f.downcast::<JsFunction>().or_throw(&mut cx)?;
+                let cb = EventHandler::new(&cx, this, f);
 
-            let ctx = context::dc_context_new(Some(callback), std::ptr::null_mut(), None);
+                Box::new(move |_ctx, event| {
+                    // TODO: handle events
+                    cb.schedule_with(move |cx, this, callback| {
+                        let event_name = match event {
+                            Event::Info(_) => "Info".into(),
+                            Event::Warning(_) => "Warning".into(),
+                            Event::Error(_) => "Error".into(),
+                            Event::SmtpConnected(_) => "Smtp Connected".into(),
+                            Event::ImapConnected(_) => "Imap Connected".into(),
+                            Event::ErrorNetwork(_) => "Error Network".into(),
+                            _ => format!("{:?}", event),
+                        };
 
-            if let Some(f) = cx.argument_opt(0) {
-                let cb = &mut *CALLBACK.write().unwrap();
-                assert!(cb.is_none(), "Only one context supported at the moment");
+                        let text = match event {
+                            Event::Info(ref txt)
+                                | Event::Warning(ref txt)
+                                | Event::Error(ref txt)
+                                | Event::SmtpConnected(ref txt)
+                                | Event::ImapConnected(ref txt)
+                                | Event::ErrorNetwork(ref txt) => cx.string(txt).upcast(),
+                            _ => cx.undefined().upcast(),
+                        };
+                        let args: Vec<Handle<JsValue>> = vec![cx.string(event_name).upcast(), text];
+                        let _result = callback.call(cx, this, args);
+                    });
+                })
+            } else {
+                Box::new(|_, _| {})
+            };
 
-                *cb = Some(EventHandler::new(this, f.downcast::<JsFunction>().or_throw(&mut cx)?));
-            }
+
+            let dbfile = cx.argument::<JsString>(0)?.value();
+            let dir = std::path::Path::new(&dbfile);
+
+            std::fs::create_dir_all(&dir)
+                .map_err(|err| format!("Failed to create directory {:?}", err)).unwrap();
+
+            let ctx = context::Context::new(cb, "desktop".into(), dir.join("db.sqlite").to_path_buf())
+                .expect("failed to create context");
 
             Ok(ContextWrapper {
                 context: Arc::new(RwLock::new(ctx)),
@@ -196,23 +114,6 @@ declare_types! {
             })
         }
 
-        method open(mut cx) {
-            let this = cx.this();
-
-            let dbfile = cx.argument::<JsString>(0)?.value();
-            let blobdir = None;
-
-            let context = {
-                let guard = cx.lock();
-                let ctx = this.borrow(&guard);
-                ctx.context.clone()
-            };
-
-            let cb = OpenTask::new(context, dbfile, blobdir);
-            cb.schedule(cx.argument::<JsFunction>(1)?);
-
-            Ok(cx.undefined().upcast())
-        }
 
         method configure(mut cx) {
             let this = cx.this();
@@ -223,7 +124,7 @@ declare_types! {
                 ctx.context.clone()
             };
 
-            unsafe { configure::configure(&context.read().unwrap()) };
+            configure::configure(&context.read().unwrap());
 
             Ok(cx.undefined().upcast())
         }
@@ -237,21 +138,14 @@ declare_types! {
                 ctx.context.clone()
             };
 
-            let res = unsafe {
-                let c_str = context::dc_get_info(&context.read().unwrap());
-                std::ffi::CStr::from_ptr(c_str).to_str().unwrap()
-            };
+            let res = context.read().unwrap().get_info();
 
             let info = JsObject::new(&mut cx);
 
-            for line in res.lines() {
-                let mut parts = line.split_terminator('=');
-                let key = parts.next().unwrap_or_default();
-                let value = cx.string(parts.next().unwrap_or_default());
-
+            for (key, value) in res.into_iter() {
+                let value = cx.string(value);
                 info.set(&mut cx, key, value)?;
             }
-
 
             Ok(info.upcast())
         }
@@ -276,11 +170,11 @@ declare_types! {
                     while running.load(Ordering::Relaxed) {
                         {
                             let ctx = &context.read().unwrap();
-                            job::perform_imap_jobs(ctx);
-                            job::perform_imap_fetch(ctx);
+                            job::perform_inbox_jobs(ctx);
+                            job::perform_inbox_fetch(ctx);
                         }
                         while running.load(Ordering::Relaxed) {
-                            job::perform_imap_idle(&context.read().unwrap());
+                            job::perform_inbox_idle(&context.read().unwrap());
                         }
                     }
                 })
@@ -347,7 +241,7 @@ declare_types! {
                     {
                         let context = &ctx.context.read().unwrap();
                         // Interrupt
-                        job::interrupt_imap_idle(context);
+                        job::interrupt_inbox_idle(context);
                         job::interrupt_mvbox_idle(context);
                         job::interrupt_sentbox_idle(context);
                         job::interrupt_smtp_idle(context);
@@ -357,24 +251,8 @@ declare_types! {
                         handles.join().unwrap();
                     }
                 }
-
-                CALLBACK.write().unwrap().take();
             }
             Ok(cx.undefined().upcast())
-        }
-
-        method isOpen(mut cx) {
-            let this = cx.this();
-
-            let context = {
-                let guard = cx.lock();
-                let ctx = this.borrow(&guard);
-                ctx.context.clone()
-            };
-
-            let res = unsafe { context::dc_is_open(&context.read().unwrap()) };
-
-            Ok(cx.boolean(res == 1).upcast())
         }
 
         method isConfigured(mut cx) {
@@ -414,12 +292,8 @@ declare_types! {
                 let ctx = this.borrow(&guard);
                 ctx.context.clone()
             };
-
-            let blobdir = unsafe {
-                let ptr = context.read().unwrap().get_blobdir();
-                assert!(!ptr.is_null());
-                std::ffi::CStr::from_ptr(ptr).to_str().unwrap()
-            };
+            let ctx = context.read().unwrap();
+            let blobdir = ctx.get_blobdir().to_str().unwrap_or_default();
 
             Ok(cx.string(blobdir).upcast())
         }

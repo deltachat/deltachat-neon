@@ -37,7 +37,8 @@ test('static method maybeValidAddr()', t => {
 // })
 
 test('dc.getInfo()', t => {
-  const dc = new Context()
+  const cwd = tempy.directory()
+  const dc = new Context(cwd)
   const info = dc.getInfo()
   t.same(Object.keys(info).sort(), [
     'arch',
@@ -390,10 +391,13 @@ test('ChatList methods', dc((t, dc) => {
 
 function dc (fn) {
   return t => {
-    const dc = new Context((event, data) => {
+    const cwd = tempy.directory()
+    const dc = new Context(cwd, (event, data) => {
       console.log(`[${event}] ${data}`)
     })
-    const cwd = tempy.directory()
+
+    t.is(dc.isConfigured(), false, 'should not be configured')
+    
     const end = t.end.bind(t)
 
     t.end = () => {
@@ -407,15 +411,7 @@ function dc (fn) {
       }, 50)
     }
 
-    // t.is(dc.isOpen(), false, 'context database is not open')
-    dc.open(cwd, (err) => {
-      t.is(err, null, 'failed to open database')
-      t.is(dc.isOpen(), true, 'context database is open')
-      t.is(dc.isConfigured(), false, 'should not be configured')
-
-      dc.connect()
-
-      fn(t, dc, cwd)
-    })
+    dc.connect()
+    fn(t, dc, cwd)
   }
 }
