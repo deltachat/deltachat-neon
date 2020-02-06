@@ -93,8 +93,8 @@ test('basic configuration', dc((t, dc, cwd) => {
 test('create chat from contact and Chat methods', dc((t, dc) => {
   const contactId = dc.createContact('aaa', 'aaa@site.org')
 
-  t.is(dc.lookupContactIdByAddr('aaa@site.org'), true)
-  t.is(dc.lookupContactIdByAddr('nope@site.net'), false)
+  t.notEqual(dc.lookupContactIdByAddr('aaa@site.org'), 0)
+  t.is(dc.lookupContactIdByAddr('nope@site.net'), 0)
 
   let chatId = dc.createChatByContactId(contactId)
   let chat = dc.getChat(chatId)

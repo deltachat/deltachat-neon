@@ -313,6 +313,21 @@ declare_types! {
 
             Ok(cx.number(contact).upcast())
         }
+
+        method lookupContactIdByAddr(mut cx) {
+            let this = cx.this();
+            let context = {
+                let guard = cx.lock();
+                let ctx = this.borrow(&guard);
+                ctx.context.clone()
+            };
+            let ctx = context.read().unwrap();
+
+            let addr = cx.argument::<JsString>(0)?.value();
+            let contact = contact::Contact::lookup_id_by_addr(&ctx, addr);
+
+            Ok(cx.number(contact).upcast())
+        }
     }
 }
 
